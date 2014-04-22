@@ -1,7 +1,7 @@
 MapMover
 ========
 
-This is a library to move the google map api v2 with the gps.  You pass in activity and google map and the map moves with gps.  The proect has to be setup to use googleplayservices just like any project that uses google maps api v2.  You pass in activity and google map and the map moves with the gps.
+This is a library to move the google map api v2 with the gps.  Yes googlemap api can already do this if the user clicks the mylocationbutton.  With MapMover you can move the map without the user clicking a button.  You pass in activity and google map and the map moves with gps.  The mapmover project has to be setup to use googleplayservices just like any project that uses google maps api v2 but you don't need the api key or anything in the manifiest.  You add the mapmover project to your project just like any other library project.  Or you can simply copy mapmover.java to your project.
 
 in OnResume
 
