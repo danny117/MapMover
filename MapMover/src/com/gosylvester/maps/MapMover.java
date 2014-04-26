@@ -36,12 +36,10 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 		com.google.android.gms.location.LocationListener, Listener {
 
 	private MapMoverCallbacks mapMoverCallbacks;
-
 	private static final double PI = Math.PI;
 	private static final double PI2 = 2 * PI;
 	private static final double PI3 = 3 * PI;
 	private double expectedDistanceMultiplier;
-	
 	private static CameraPosition currentCameraPosition;
 	private static com.google.android.gms.maps.model.CameraPosition.Builder cameraPositionBuilder;
 	private volatile CameraUpdate nextCameraUpdate;
@@ -106,7 +104,6 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 
 	private boolean isMPH = true;
 	private boolean isSpeed = true;
-
 	private boolean isHeadingUp = true;
 
 	/**
@@ -146,6 +143,7 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 			locationManager.removeGpsStatusListener(this);
 			if (locationClient.isConnected()) {
 				locationClient.removeLocationUpdates(this);
+				locationClient.disconnect();
 			}
 			setSatLockStatus("");
 			speedHandler.removeCallbacks(updateSpeedThread);
@@ -413,8 +411,8 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 				LatLng ll = new LatLng(workingLocation.getLatitude(),
 						workingLocation.getLongitude());
 				cameraPositionBuilder.zoom(currentCameraPosition.zoom)
-				// previous camera tilt
-						.tilt(currentCameraPosition.tilt)
+				// is heading up tilt 75 north up tilt 0
+						.tilt(isHeadingUp? 75f:0f)
 						// new expected destination
 						.target(ll)
 						// north up or heading view
