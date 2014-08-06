@@ -4,7 +4,6 @@ import java.text.DecimalFormat;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import android.annotation.SuppressLint;
-import android.app.Activity;
 import android.content.Context;
 import android.location.GpsSatellite;
 import android.location.GpsStatus;
@@ -35,28 +34,25 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 		OnConnectionFailedListener,
 		com.google.android.gms.location.LocationListener, Listener {
 
-	private MapMoverCallbacks mapMoverCallbacks;
+	private MapMoverCallbacks callback;
 	private static final double PI = Math.PI;
 	private static final double PI2 = 2 * PI;
 	private static final double PI3 = 3 * PI;
+	private long speedInterval;
+	private GoogleMap mMap;
 	private double expectedDistanceMultiplier;
-	private static CameraPosition currentCameraPosition;
-	private static com.google.android.gms.maps.model.CameraPosition.Builder cameraPositionBuilder;
-	private volatile CameraUpdate nextCameraUpdate;
-
-	private volatile boolean isAnimating;
-
 	private int interval = 5000;
 
-	private GoogleMap mMap;
+	private volatile CameraUpdate nextCameraUpdate;
+	private volatile boolean isAnimating;
 
 	private LocationManager locationManager;
 	private LocationClient locationClient;
-	private LocationRequest locationRequest;
 
 	private DecimalFormat decimalFormat;
 
 	private Handler speedHandler;
+
 	private double actualSpeed = 0;
 	AtomicBoolean hasNewSpeed;
 
@@ -88,20 +84,6 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	 * initialize the map mover
 	 */
 
-	public MapMover(Activity activity, GoogleMap googleMap) {
-		mapMoverCallbacks = (MapMoverCallbacks.class.isAssignableFrom(activity
-				.getClass())) ? (MapMoverCallbacks) activity : null;
-		locationManager = (LocationManager) activity
-				.getSystemService(Context.LOCATION_SERVICE);
-
-		mMap = googleMap;
-		locationClient = new LocationClient(activity, this, this);
-		cameraPositionBuilder = CameraPosition.builder();
-		decimalFormat = new DecimalFormat("##0.0");
-		speedHandler = new Handler();
-		hasNewSpeed = new AtomicBoolean(false);
-	}
-
 	private boolean isMPH = true;
 	private boolean isSpeed = true;
 	private boolean isHeadingUp = true;
@@ -124,30 +106,66 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 
 	private boolean action_track = false;
 
+	public void stopAction_track() {
+		action_track = false;
+		if (mMap != null) {
+			mMap.stopAnimation();
+		}
+
+		setSatLockStatus("");
+		callback = null;
+
+		if (locationManager != null) {
+			locationManager.removeGpsStatusListener(this);
+		}
+		if (locationClient != null) {
+			if (locationClient.isConnected()) {
+				locationClient.removeLocationUpdates(this);
+				locationClient.disconnect();
+			}
+		}
+
+		if (speedHandler != null) {
+			speedHandler.removeCallbacks(updateSpeedThread);
+		}
+
+		speedHandler = null;
+		locationManager = null;
+		locationClient = null;
+		decimalFormat = null;
+		mMap = null;
+		hasNewSpeed = null;
+
+	}
+
 	/**
 	 * @param action_track
 	 *            the action_tracker to set Set to true and it starts receiving
 	 *            gps and moving map set to false and it stops receiving gps.
 	 */
-	public void setAction_track(boolean action_track) {
-		this.action_track = action_track;
+	public void startAction_track(Context context, GoogleMap gMap,
+			MapMoverCallbacks mapMoverCallbacks) {
+		callback = mapMoverCallbacks;
+		hasNewSpeed = new AtomicBoolean(false);
+		action_track = true;
 		// if on start location updates by requesting a connection
-		if (action_track) {
-			setSatLockStatus("");
-			isAnimating = false;
-			locationClient.connect();
-			locationManager.addGpsStatusListener(this);
+		mMap = gMap;
+		setSatLockStatus("");
+
+		if (locationClient == null) {
+			locationClient = new LocationClient(context, this, this);
 		}
-		// stop location updates
-		else {
-			locationManager.removeGpsStatusListener(this);
-			if (locationClient.isConnected()) {
-				locationClient.removeLocationUpdates(this);
-				locationClient.disconnect();
-			}
-			setSatLockStatus("");
-			speedHandler.removeCallbacks(updateSpeedThread);
+		if (locationManager == null) {
+			locationManager = (LocationManager) context
+					.getSystemService(Context.LOCATION_SERVICE);
 		}
+		if (decimalFormat == null) {
+			decimalFormat = new DecimalFormat("##0.0");
+		}
+		isAnimating = false;
+		locationClient.connect();
+		locationManager.addGpsStatusListener(this);
+		speedHandler = new Handler();
 	}
 
 	/**
@@ -164,7 +182,10 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 
 	private int processedLocations;
 
-	private long locationInterval;
+	// time it takes to update the display this is 10 per second.
+	private final int speedCount = 100;
+	private float displacement = 1f;
+	private boolean isAccuracyAlgorythm = true;
 
 	/**
 	 * @return the gps satellite status
@@ -181,15 +202,19 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	@Override
 	public void onConnected(Bundle dataBundle) {
 		// Create a new global location parameters object
-		locationRequest = LocationRequest.create();
+		LocationRequest locationRequest = LocationRequest.create();
 		// Set the update interval 70% of the interval
 		// this is to make sure we have an updated location
 		// when the animation completes
-		locationInterval = (long) (interval * .70);
+		long locationInterval = (long) (interval * .70);
 		locationRequest.setInterval(locationInterval);
 		locationRequest.setFastestInterval(locationInterval);
 		locationRequest.setPriority(LocationRequest.PRIORITY_HIGH_ACCURACY);
+		locationRequest.setSmallestDisplacement(displacement);
 		locationClient.requestLocationUpdates(locationRequest, this);
+		locationRequest = null;
+		// number of miliseconds to update the speed 10 per second 100
+		speedInterval = (long) interval / speedCount;
 	}
 
 	/*
@@ -200,12 +225,20 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	@SuppressLint("NewApi")
 	@Override
 	public void onLocationChanged(Location location) {
-		Log.d("test", Boolean.toString(isAnimating) + " onlocation");
-		currentCameraPosition = mMap.getCameraPosition();
+		if (!action_track) {
+			return;
+		}
+		if (isAccuracyAlgorythm) {
+			if (!location.hasAccuracy()) {
+				return;
+			}
+			if (location.getAccuracy() > 42) {
+				return;
+			}
+		}
 
 		NewCameraUpdateTask newCameraUpdateTask = new NewCameraUpdateTask();
 
-		// The nextcameraupdate task must run immediately
 		// it can't wait for less important tasks to finish
 		if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.HONEYCOMB) {
 			newCameraUpdateTask.executeOnExecutor(
@@ -278,8 +311,8 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	 */
 	@Override
 	public void onConnectionFailed(ConnectionResult connectionResult) {
-		if (this.mapMoverCallbacks != null) {
-			mapMoverCallbacks.onMapMoverConnectionFailed(connectionResult);
+		if (callback != null) {
+			callback.onMapMoverConnectionFailed(connectionResult);
 		}
 	}
 
@@ -288,17 +321,18 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	 * the number of satelelites used in the location
 	 */
 	private void satlock() {
-		GpsStatus gpsStat = locationManager.getGpsStatus(null);
-		if (gpsStat != null) {
-			int j = 0;
-			for (GpsSatellite satellite : gpsStat.getSatellites()) {
-				if (satellite.usedInFix()) {
-					j++;
+		if (locationManager != null) {
+			GpsStatus gpsStat = locationManager.getGpsStatus(null);
+			if (gpsStat != null) {
+				int j = 0;
+				for (GpsSatellite satellite : gpsStat.getSatellites()) {
+					if (satellite.usedInFix()) {
+						j++;
+					}
 				}
+				setSatLockStatus("Sat Lock " + j);
 			}
-			setSatLockStatus("Sat Lock " + j);
 		}
-
 	}
 
 	/*
@@ -308,8 +342,8 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	private void setSatLockStatus(String status) {
 		if (!satLockStatus.equals(status)) {
 			satLockStatus = status;
-			if (mapMoverCallbacks != null) {
-				mapMoverCallbacks.onSatLockChange(satLockStatus);
+			if (callback != null) {
+				callback.onSatLockChange(satLockStatus);
 			}
 		}
 	}
@@ -321,25 +355,53 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	private class NewCameraUpdateTask extends
 			AsyncTask<Location, Void, CameraUpdate> {
 
+		private CameraPosition taskcurrentCameraPosition;
+		private CameraPosition.Builder cameraPositionBuilder = CameraPosition
+				.builder();
+		private double taskexpectedDistanceMultiplier;
+
+		public NewCameraUpdateTask() {
+
+		}
+
+		@Override
+		protected void onPreExecute() {
+			if (mMap==null){
+				this.cancel(true);
+				return;
+			}
+			this.taskcurrentCameraPosition = mMap.getCameraPosition();
+			this.taskexpectedDistanceMultiplier = expectedDistanceMultiplier;
+		}
+
 		@Override
 		protected CameraUpdate doInBackground(Location... params) {
-			Location workingLocation = null;
-			CameraUpdate newCameraUpdate = null;
+			// Location workingLocation = null;
+			LatLng ll;
 
 			float bearing = 0f;
-			float speed = 0f;
+			float speed;
 
 			for (Location mlocation : params) {
+				// zero is return when location has no speed.
 				speed = mlocation.getSpeed();
 
 				// camera position is saved before the start of each animation.
 
-				if (!mlocation.hasBearing() || speed == 0) {
-					workingLocation = mlocation;
+				if (mlocation.hasBearing()) {
+					bearing = mlocation.getBearing();
+				} else {
+					bearing = taskcurrentCameraPosition.bearing;
+				}
+
+				// cant calc anything without speed
+				if (speed == 0) {
+					// workingLocation = mlocation;
+					ll = new LatLng(mlocation.getLatitude(),
+							mlocation.getLongitude());
 					// previous bearing
 				} else {
-					// current bearing
-					bearing = mlocation.getBearing();
+
 					// calculate the age of the location
 					// atempt for animation to end a little bit past when
 					// the
@@ -350,7 +412,7 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 					// km/m)
 					// (1/6371 radians/km) = radians/6371000000.0
 
-					double expectedDistance = expectedDistanceMultiplier
+					double expectedDistance = taskexpectedDistanceMultiplier
 							* speed;
 
 					// latitude in Radians
@@ -393,35 +455,43 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 							.toDegrees(expectedLongitude);
 					double expectedLatitudeDestination = Math
 							.toDegrees(expectedLatitude);
-
-					mlocation.setLatitude(expectedLatitudeDestination);
-					mlocation.setLongitude(expectedLongitudeDestination);
-					workingLocation = mlocation;
-
+					ll = new LatLng(expectedLatitudeDestination,
+							expectedLongitudeDestination);
 				}
-				break;
-			}
 
-			if (workingLocation != null) {
-				if (workingLocation.hasBearing()) {
-					bearing = workingLocation.getBearing();
-				} else {
-					bearing = currentCameraPosition.bearing;
-				}
-				LatLng ll = new LatLng(workingLocation.getLatitude(),
-						workingLocation.getLongitude());
-				cameraPositionBuilder.zoom(currentCameraPosition.zoom)
+				cameraPositionBuilder.zoom(taskcurrentCameraPosition.zoom)
 				// is heading up tilt 75 north up tilt 0
-						.tilt(isHeadingUp? 75f:0f)
+						.tilt(isHeadingUp ? 75f : 0f)
 						// new expected destination
 						.target(ll)
 						// north up or heading view
 						.bearing((isHeadingUp) ? bearing : 0f);
-				newCameraUpdate = CameraUpdateFactory
-						.newCameraPosition(cameraPositionBuilder.build());
+
+				break;
 			}
 
-			return newCameraUpdate;
+			return CameraUpdateFactory.newCameraPosition(cameraPositionBuilder
+					.build());
+
+			// if (workingLocation != null) {
+			// if (workingLocation.hasBearing()) {
+			// bearing = workingLocation.getBearing();
+			// } else {
+			// bearing = currentCameraPosition.bearing;
+			// }
+			// LatLng ll = new LatLng(workingLocation.getLatitude(),
+			// workingLocation.getLongitude());
+			// cameraPositionBuilder.zoom(currentCameraPosition.zoom)
+			// // is heading up tilt 75 north up tilt 0
+			// .tilt(isHeadingUp ? 75f : 0f)
+			// // new expected destination
+			// .target(ll)
+			// // north up or heading view
+			// .bearing((isHeadingUp) ? bearing : 0f);
+			// newCameraUpdate = CameraUpdateFactory
+			// .newCameraPosition(cameraPositionBuilder.build());
+
+			// return newCameraUpdate;
 		}
 
 		@Override
@@ -441,7 +511,6 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	 * called to start the nextcameraupdate
 	 */
 	private void startAnimation() {
-		Log.d("test", Boolean.toString(isAnimating) + " startAnimation");
 		if (isAnimating || nextCameraUpdate == null) {
 			return;
 		}
@@ -449,12 +518,12 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 		CameraUpdate animateCameraUpdate = nextCameraUpdate;
 		nextCameraUpdate = null;
 		mMap.animateCamera(animateCameraUpdate, interval, this);
-		Log.d("test", Boolean.toString(isAnimating) + " startanimateCamera");
 	}
 
-	public boolean getGpsEnabled() {
-		return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
-	}
+	// public boolean getGpsEnabled() {
+	// if (locationManager!=null)
+	// return locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
+	// }
 
 	@Override
 	public void onDisconnected() {
@@ -482,8 +551,8 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	private void setDisplaySpeed(String displaySpeed) {
 		if (!_displaySpeed.equals(displaySpeed)) {
 			_displaySpeed = displaySpeed;
-			if (this.mapMoverCallbacks != null) {
-				mapMoverCallbacks.onSpeedChange(displaySpeed);
+			if (callback != null) {
+				callback.onSpeedChange(displaySpeed);
 			}
 		}
 	}
@@ -531,22 +600,29 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 
 			// cacluate new speed
 			if (hasNewSpeed.compareAndSet(true, false)) {
+
 				// convert newSpeed to mph
-
 				actualSpeed = newSpeed * (isMPH ? 2.23694 : 3.6);
-
+				// diff rounded to .1;
 				diff = Math.round(Math.abs(currentSpeed - actualSpeed) / n1)
 						* n1;
 				// divide by zero time less than zero too long of interval
-				// currentSpeed = speed
+
 				if (diff == 0) {
 					currentSpeed = actualSpeed;
-				}
-				// exit if the workDelay is bad
-				// workDelay is too short just update the speed
-				workDelay = (long) (Math.round(locationInterval / diff * n1));
-				if (workDelay < 1) {
-					currentSpeed = actualSpeed;
+				} else {
+					// calculate n1 for the speedCount;
+					n1 = diff / speedCount;
+					// if n1 is less than .1 recalc the speedInterval
+					// to save CPU. This will be the case
+					// when running at constant speed.
+					// which should be most cases.
+					if (n1 < .1) {
+						n1 = .1;
+						workDelay = (long) (interval / diff * .1);
+					} else {
+						workDelay = speedInterval;
+					}
 				}
 			}
 
@@ -569,11 +645,14 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 			} else {
 				speedHandler.postDelayed(this, workDelay);
 			}
+
 			setDisplaySpeed(decimalFormat.format(currentSpeed));
 		}
 	};
 
-	
+	public void setAccuracyAlgorythm(boolean isAccuracy) {
+		isAccuracyAlgorythm = isAccuracy;
+	}
 
 	/**
 	 * @param gpsReadsPerMinute
@@ -591,6 +670,47 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 		if (interval != newinterval) {
 			interval = newinterval;
 			expectedDistanceMultiplier = (double) interval / 6371000000.0;
+			if (locationClient.isConnected()) {
+				locationClient.disconnect();
+				locationClient.connect();
+			}
+		}
+	}
+
+	/**
+	 * @param gpsInterval
+	 * 
+	 * @throws IllegalArgumentException
+	 */
+	public void setInterval(int newInterval) throws IllegalArgumentException {
+		if (newInterval < 500 || newInterval > 60000) {
+			throw new IllegalArgumentException(
+					"interval not between 500 and 60000");
+		}
+
+		if (interval != newInterval) {
+			interval = newInterval;
+			expectedDistanceMultiplier = (double) interval / 6371000000.0;
+			if (locationClient.isConnected()) {
+				locationClient.disconnect();
+				locationClient.connect();
+			}
+		}
+	}
+
+	/**
+	 * @param gpsInterval
+	 * 
+	 * @throws IllegalArgumentException
+	 */
+	public void setDisplacement(float newDisplacement)
+			throws IllegalArgumentException {
+		if (newDisplacement < 0f || newDisplacement > 20f) {
+			throw new IllegalArgumentException(
+					"displacement not between 0 and 20");
+		}
+		if (displacement != newDisplacement) {
+			displacement = newDisplacement;
 			if (locationClient.isConnected()) {
 				locationClient.disconnect();
 				locationClient.connect();
