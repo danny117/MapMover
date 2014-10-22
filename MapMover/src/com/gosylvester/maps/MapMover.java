@@ -111,7 +111,6 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 		if (mMap != null) {
 			mMap.stopAnimation();
 		}
-
 		setSatLockStatus("");
 		callback = null;
 
@@ -122,6 +121,7 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 			if (locationClient.isConnected()) {
 				locationClient.removeLocationUpdates(this);
 				locationClient.disconnect();
+				locationClient = null;
 			}
 		}
 
@@ -131,7 +131,7 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 
 		speedHandler = null;
 		locationManager = null;
-		locationClient = null;
+
 		decimalFormat = null;
 		mMap = null;
 		hasNewSpeed = null;
@@ -154,17 +154,18 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 
 		if (locationClient == null) {
 			locationClient = new LocationClient(context, this, this);
+			locationClient.connect();
 		}
 		if (locationManager == null) {
 			locationManager = (LocationManager) context
 					.getSystemService(Context.LOCATION_SERVICE);
 		}
+		locationManager.removeGpsStatusListener(this);
+		locationManager.addGpsStatusListener(this);
 		if (decimalFormat == null) {
 			decimalFormat = new DecimalFormat("##0.0");
 		}
 		isAnimating = false;
-		locationClient.connect();
-		locationManager.addGpsStatusListener(this);
 		speedHandler = new Handler();
 	}
 
@@ -201,6 +202,17 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 	 */
 	@Override
 	public void onConnected(Bundle dataBundle) {
+		if (!action_track) {
+			if (locationClient != null) {
+				if (locationClient.isConnected()) {
+					locationClient.removeLocationUpdates(this);
+					locationClient.disconnect();
+					locationClient = null;
+				}
+			}
+			return;
+		}
+
 		// Create a new global location parameters object
 		LocationRequest locationRequest = LocationRequest.create();
 		// Set the update interval 70% of the interval
@@ -366,7 +378,7 @@ implements CancelableCallback, GooglePlayServicesClient.ConnectionCallbacks,
 
 		@Override
 		protected void onPreExecute() {
-			if (mMap==null){
+			if (mMap == null) {
 				this.cancel(true);
 				return;
 			}
